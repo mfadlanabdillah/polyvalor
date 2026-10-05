@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' ws://localhost:*" />
+  <title>PolyValor</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=Teko:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/src/style.css" />
+</head>
+<body>
+  <canvas id="game"></canvas>
+
+  <!-- ================= MAIN MENU ================= -->
+  <div id="menu" class="screen">
+    <div class="menu-inner">
+      <div class="logo">POLY<span>VALOR</span></div>
+      <div class="tagline">5v5 low-poly tactical shooter · practice against AI</div>
+
+      <div class="menu-grid">
+        <div class="panel">
+          <h3>Select Agent</h3>
+          <div id="agent-list" class="agent-list"></div>
+          <div id="agent-detail" class="agent-detail"></div>
+        </div>
+        <div class="panel">
+          <h3>Match Settings</h3>
+          <label>Mode
+            <select id="opt-mode">
+              <option value="quick">Swiftplay — first to 5</option>
+              <option value="standard">Standard — first to 13</option>
+            </select>
+          </label>
+          <label>Bot difficulty
+            <select id="opt-diff">
+              <option value="easy">Easy</option>
+              <option value="normal" selected>Normal</option>
+              <option value="hard">Hard</option>
+            </select>
+          </label>
+          <label>Starting side
+            <select id="opt-side">
+              <option value="atk">Attack</option>
+              <option value="def">Defense</option>
+            </select>
+          </label>
+          <label>Mouse sensitivity <span id="sens-val">0.40</span>
+            <input id="opt-sens" type="range" min="0.05" max="1.5" step="0.01" value="0.4" />
+          </label>
+          <label>Volume <span id="vol-val">60%</span>
+            <input id="opt-vol" type="range" min="0" max="1" step="0.01" value="0.6" />
+          </label>
+          <label class="check"><input id="opt-fs" type="checkbox" checked /> Fullscreen (lets Ctrl crouch safely)</label>
+          <button id="btn-play" class="btn-primary">LOCK IN &amp; PLAY</button>
+          <button id="btn-settings" class="btn-secondary">SETTINGS</button>
+          <button id="btn-exit" class="btn-secondary desktop-only">EXIT TO DESKTOP</button>
+        </div>
+        <div class="panel controls">
+          <h3>Controls</h3>
+          <table id="controls-table"></table>
+          <p class="hint">Tip: stop moving before you shoot. Running and jumping ruin accuracy — just like the real thing.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= HUD ================= -->
+  <div id="hud" class="hidden">
+    <div id="topbar">
+      <div id="portraits-ally" class="portraits"></div>
+      <div class="score ally" id="score-ally">0</div>
+      <div id="timer-box"><div id="timer">1:40</div><div id="round-label">ROUND 1</div></div>
+      <div class="score enemy" id="score-enemy">0</div>
+      <div id="portraits-enemy" class="portraits"></div>
+    </div>
+    <canvas id="minimap" width="264" height="240"></canvas>
+    <div id="zone-label"></div>
+    <div id="callouts"></div>
+    <div id="killfeed"></div>
+    <div id="crosshair"></div>
+    <div id="hitmarker"><i></i><i></i><i></i><i></i></div>
+    <div id="dmg-numbers"></div>
+    <div id="hint-bar" class="hidden"></div>
+    <div id="dmg-indicators"></div>
+    <div id="banner" class="hidden"><div class="b-title"></div><div class="b-sub"></div></div>
+    <div id="toast"></div>
+    <div id="prompt"></div>
+    <div id="progress" class="hidden"><div class="p-label"></div><div class="p-track"><div class="p-fill"></div><div class="p-half"></div></div></div>
+    <div id="kill-icons"></div>
+
+    <div id="bottom">
+      <div id="vitals">
+        <div id="armor-val" class="armor">0</div>
+        <div id="hp-val" class="hp">100</div>
+      </div>
+      <div id="abilities"></div>
+    </div>
+    <div id="weapon-info">
+      <img id="weapon-icon" alt="" />
+      <div class="ammo"><span id="ammo">12</span><span class="reserve" id="reserve">/ 36</span></div>
+      <div id="weapon-name">Classic</div>
+      <div id="credits-small"></div>
+    </div>
+    <div id="spike-carrier" class="hidden">◆ SPIKE</div>
+
+    <div id="death-info" class="hidden"></div>
+
+    <div id="buy-menu" class="hidden">
+      <div class="buy-head">
+        <div class="buy-title">ARMORY</div>
+        <div class="buy-credits">¤ <span id="buy-credits">800</span></div>
+        <div class="buy-tip">Click to buy · click an item bought this round again to sell · B to close</div>
+      </div>
+      <div class="buy-body">
+        <div id="buy-weapons"></div>
+        <div class="buy-side">
+          <div id="buy-detail"></div>
+          <div id="buy-quick"></div>
+          <div id="buy-shields"></div>
+          <div id="buy-abilities"></div>
+          <div id="buy-team"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="scoreboard" class="hidden"></div>
+
+    <div id="scope-overlay" class="hidden"><div class="scope-ring"></div><div class="scope-h"></div><div class="scope-v"></div></div>
+    <div id="smoke-overlay"></div>
+    <div id="damage-overlay"></div>
+    <div id="flash-overlay"></div>
+    <div id="cursor" class="hidden"></div>
+  </div>
+
+  <div id="pause" class="screen hidden">
+    <div class="pause-box">
+      <h2>PAUSED</h2>
+      <button id="btn-resume" class="btn-primary">RESUME</button>
+      <label>Mouse sensitivity <span id="sens-val2">0.40</span>
+        <input id="opt-sens2" type="range" min="0.05" max="1.5" step="0.01" value="0.4" />
+      </label>
+      <button id="btn-settings2" class="btn-secondary">SETTINGS</button>
+      <button id="btn-quit" class="btn-secondary">QUIT TO MENU</button>
+      <button id="btn-exit2" class="btn-secondary desktop-only">EXIT TO DESKTOP</button>
+    </div>
+  </div>
+
+  <div id="settings" class="screen hidden">
+    <div class="settings-box">
+      <div class="set-head">
+        <h2>SETTINGS</h2>
+        <div class="set-tabs">
+          <button data-tab="general" class="on">GENERAL</button>
+          <button data-tab="gameplay">GAMEPLAY</button>
+          <button data-tab="crosshair">CROSSHAIR</button>
+          <button data-tab="graphics">GRAPHICS</button>
+          <button data-tab="controls">CONTROLS</button>
+        </div>
+      </div>
+      <div class="set-body" id="set-body"></div>
+      <div class="set-foot">
+        <button id="set-reset" class="btn-secondary">RESET THIS TAB</button>
+        <button id="set-close" class="btn-primary">DONE</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="fps" class="hidden"></div>
+
+  <div id="end-screen" class="screen hidden">
+    <div class="end-box">
+      <div id="end-title">VICTORY</div>
+      <div id="end-score">13 - 7</div>
+      <div id="end-table"></div>
+      <button id="btn-again" class="btn-primary">PLAY AGAIN</button>
+      <button id="btn-menu" class="btn-secondary">MAIN MENU</button>
+    </div>
+  </div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>

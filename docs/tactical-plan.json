@@ -1,0 +1,738 @@
+{
+  "vision": "After all four waves PolyValor plays like a real tactical shooter against a team that seems to think. Every shot reads clearly: streak tracers and material impacts, whiz-by cracks and suppression, distinct head, body, armor and wallbang hit ticks, readable recoil, and shake on big blasts. Doubles, aces, trades and clutches get stingers and a 1vN chip, and the round-winning kill gets a short slow-motion beat. Sound is information. Walls muffle what you hear, walking and suppressed guns stay hidden, and plants, defuses, reloads and utility all make sounds that both you and the bots can read and use to bait. Utility is aimed: you equip it, see the arc and landing ring, throw or lob it, and are committed during the cast. Flashes pop with a beat of warning and punish careless throws. Bots trade kills, pre-aim spots the team has called (including enemies you spotted), swing off flashes, smoke before they push, dodge mollies and orbital strikes, and use their whole kit. They also play the economy as a team: eco, force and full buys, and dropping rifles for teammates. Each round attackers pick a different plan (default, rush, split, lurk or fake) and remember where you stacked. Defenders rotate between setups. Post-plant, attackers hold crossfires, defenders gather and retake together, and hopeless fights end in saves. The player leads the squad with pings, an order wheel, and a tactical map with fading last-known enemy positions.",
+  "waves": [
+    {
+      "name": "Wave 1 - Foundations and quick wins",
+      "goal": "Fix the broken map data (blind holds, site-to-site lane). Make bots trade and share the player's intel. Land hit, kill and moment feedback, ballistics feel and the team economy. Later waves build on these hooks.",
+      "packages": [
+        {
+          "id": "W1-map",
+          "title": "Validated hold angles, broken long lane, smart execute smokes",
+          "mergedFrom": [
+            "map-1",
+            "map-2"
+          ],
+          "summary": "Every defender bot actually watches an entrance, and the mid defender guards the mid door. The 82 m site-to-site Operator lane becomes tense S-bend link corners. Attacker execute smokes cover defender angles, not the attackers' own doorway.",
+          "spec": "map.js LAYOUT: replace rows 13 and 14 (currently siteRow(...,true)) with these literal 44-char strings:\nrow13 '#..BBBBBBBB......#........#.....AAAAACcAA..#'\nrow14 '#..BBBCcBBB....#............#...AAAAAAAAA..#'\nThis adds walls at (17,13), (15,14), (26,13) and (28,14). Use '#', not 'C'.\n\npoi: add sites.X.angles=[{at:[c,r],look:[c,r]}] plus mid.angles.\nA: [33,8]->[37,19], [38,15]->[30,14], [40,9]->[30,14], [41,13]->[37,19], [32,16]->[37,19], [31,12]->[30,14].\nB: [3,8]->[5,19], [12,8]->[13,14], [2,15]->[5,19], [12,15]->[14,13], [8,16]->[5,19].\nmid: [24,13]->[23,17], [23,14]->[24,19], [23,12]->[23,17].\nKeep center, chokes and stage. For compatibility keep `holds = angles.map(a=>a.at)` and `defLook = unique looks`, so old readers still work.\n\nGameMap.validatePoi(): runs at the end of the constructor. Call console.warn('POI blind', key, at, look) for every angle that fails lineOfSight from toWorld(at) at y=1.62 to toWorld(look) at y=1.4.\n\nGameMap.execSmokes(siteKey), cached per site. choke=chokes[0]. For each angle whose eye sees the choke, take the point lerp(chokeW, atW, 0.75), snap it to the nearest walkable cell, and reject it if it is within 7 m of the choke. Sort by distance to site.center and keep at most 2. Also overwrite `poi.sites.X.smokes` with this result so existing consumers get good points.\n\nbot.js (localized):\n- TeamBrain.assignHold: angle=info.angles[index % n]. holdPos=toWorld(at) plus a random ±0.4 m per axis (stay in the cell; do NOT use randomWalkableNear). holdLook=toWorld(look) with y 1.5.\n- chooseGoal attacker siteSpot: pick from site.angles[k].at.\n- useAbilities execute block: Shade E uses execSmokes(site)[0]. Gale Q (cloudburst, which reaches about 18 m) fires only when the target is within 17 m and lineOfSight(eye,target) holds; otherwise retry for up to 3 s before setting usedExecUtil.",
+          "filesOwned": [
+            "src/map.js"
+          ],
+          "sharedFileEdits": [
+            "src/bot.js: TeamBrain.assignHold body; the siteSpot pick in chooseGoal's attacker branch; the Shade/Gale lines in the useAbilities execute block. No other bot.js changes."
+          ],
+          "newFiles": [],
+          "contracts": [
+            "map.poi.sites[X].angles: [{at:[c,r],look:[c,r]}]",
+            "map.poi.mid.angles",
+            "map.poi.sites[X].holds still exists (derived from angles)",
+            "map.execSmokes(siteKey) -> Vector3[] (<=2, cached)",
+            "map.validatePoi()"
+          ],
+          "acceptance": [
+            "npx vite build passes and there is no 'Layout row' length warning",
+            "Loading the game prints no 'POI blind' warning",
+            "No lineOfSight from any B plant cell to any A plant cell",
+            "A logged defender holdPos has LOS to its holdLook in every round",
+            "Execute smokes land at least 7 m from the attackers' choke; Gale never pops a smoke on the wall in front of her",
+            "The player walks through both new S-bends without snagging, and bots rotate through them without stuck resets"
+          ],
+          "effort": 2,
+          "risk": 1
+        },
+        {
+          "id": "W1-trades",
+          "title": "Trades, buddy pairs, shared player intel, pre-aim and chase leash",
+          "mergedFrom": [
+            "ai-3",
+            "tac-2",
+            "ux-2"
+          ],
+          "summary": "Kill a bot and its partner swings your angle within a second or two. Your own bot teammates avenge you, pre-aim enemies that you or they spotted, and stop feeding one at a time.",
+          "spec": "config.js DIFFICULTY: add trade:{chance,delay} with easy {.25,.9}, normal {.6,.5}, hard {.9,.3}.\n\nmain.js:\n- At the end of onKill: if m.phase==='combat' and killer and killer.squad!==victim.squad, call this.brain.onAllyDown(victim,killer). The player as victim counts.\n- In update(): accumulate dt. Every 0.1 s, for each alive enemy of the player's squad that Game.playerSees(c) reports visible (reuse hud's existing check; if none exists, use an FOV+lineOfSight test), call brain.report(playerSquad,c,c.pos,null). reporter null means no callout spam.\n\nbot.js TeamBrain:\n- onRoundStart: pair same-squad bots by spawn distance, setting b.buddy mutually. The human is never a buddy.\n- onAllyDown(v,k): candidates are alive bots of v.squad with no visible target, no c.action, !hasSpike and hp>45. score = 3*(b.buddy===v.bot) + 2/(1+d/10) - 1.5*(known enemies within 15 m). Take the top 2 that pass Math.random()<diff.trade.chance. Skip a candidate if findPath has more than 8 points or its walk length is over 34 m. If known enemies >=3 and fewer than 3 mates are alive, set b.fallback=true instead (fall back toward holdPos).\n  - Attackers, and defenders whose holdPos is within 18 m of k: b.setSwing(k.pos, diff.trade.delay, 4).\n  - Other defenders: b.holdLookOverride={pos:k.eyePos().clone(), until:t+3}.\n\nBotController:\n- setSwing(pos,delay,dur) stores this.swing={pos:pos.clone(), at:t+delay, until:t+delay+dur}.\n- In update's no-target branch: when the swing is active and t>=swing.at, set lastKnown={pos:swing.pos, time:t, id:-1} and chase=true, then clear swing.\n- The hold goal uses holdLookOverride as its look while it is active.\n- Pre-aim: every 0.25 s cache this.intelAim = the nearest brain.recentIntel(squad,2.5) entry within 30 m that is not LOS-visible (cache it, no per-frame arrays). Aim at its pos with y+1.4. Insert this between the lastKnown and alert look branches.\n- Chase leash in chooseGoal: chase lastKnown only if a mate is within 12 m, or (at most 1 enemy known and hp>60); otherwise use the hold or stage goal.\n- reset() clears swing, holdLookOverride, fallback and intelAim.",
+          "filesOwned": [
+            "src/bot.js"
+          ],
+          "sharedFileEdits": [
+            "src/main.js: one call at the end of onKill; a 0.1 s throttled player-sighting report loop in update()",
+            "src/config.js: DIFFICULTY.*.trade"
+          ],
+          "newFiles": [],
+          "contracts": [
+            "TeamBrain.onAllyDown(victim, killer)",
+            "BotController.setSwing(pos, delay, dur) and bot.swing {pos,at,until}",
+            "bot.holdLookOverride {pos,until}",
+            "bot.buddy",
+            "DIFFICULTY[x].trade {chance, delay}",
+            "Player sightings enter brain.intel[playerSquad] via brain.report(...,null)"
+          ],
+          "acceptance": [
+            "Killing a bot near two others makes up to 2 of them peek the kill spot 0.3-0.9 s later depending on difficulty",
+            "When the human dies, allied bots move toward the killer",
+            "An enemy seen only by the player becomes a pre-aim target for a nearby target-less ally bot",
+            "Solo chases (no mate within 12 m) are rare",
+            "No per-frame array allocation is added; the death frame shows no spike over 2 ms"
+          ],
+          "effort": 3,
+          "risk": 2
+        },
+        {
+          "id": "W1-feedback",
+          "title": "Hit, kill, damage and moment feedback (multi-kill, ace, clutch, trade, slow-mo, round-flow tension)",
+          "mergedFrom": [
+            "feel-2",
+            "ux-4",
+            "modes-2",
+            "feel-8"
+          ],
+          "summary": "Every hit, bullet or ability, gives a distinct tick and marker. Kills thump. Damage indicators point to the real source. Enemies flinch and fall away from your fire. Doubles, aces, trades, first blood and clutches pop with stingers, a 1vN chip appears, and the round-winning kill gets a short slow-motion beat. A gate horn, buy ticks and the spike's last-10-second urgency build tension.",
+          "spec": "Feedback:\n- character.js takeDamage: before calling world.onDamage, set info.armorHit = (absorbed>0). In models.js add CharacterModel.hitKick(head): set kickT=1, tilt torso.rotation.x -0.12*kickT (head an extra -0.4 when head), decay 6/s. Call it from takeDamage.\n- die(): this.fallYaw = atan2(pos.x-attacker.pos.x, pos.z-attacker.pos.z), falling back to this.yaw. In the dead branch of updateModel: rotation.y=fallYaw, k=1-(1-min(1,deathT/0.45))^2, rotation.x=k*PI/2*0.95. Play audio.bodyFall(pos) once.\n- main.js traceShot: add pen:dmgMult<1 to the info and remove its audio.hit/hud.hitMarker calls (meleeAttack too). Keep damageNumber.\n- abilities fire tick: pass srcPos:f.pos.\n- onDamage, when the attacker is the player and the victim is an enemy: killed=victim.hp<=0. kind = ability|wall|head|armor|leg|body. Throttle tag:false damage-over-time to one marker per 0.25 s. If !killed, call audio.hit(kind); always call hud.hitMarker(kind==='head', killed).\n- When the player is the victim: throttle to 0.4 s, hud.damageFrom(info.srcPos||attacker.pos), audio.pain(src,amount).\n- When HP is under 30, play a heartbeat (two 55 Hz sines every 0.85 s) and pulse #damage-overlay.\n\naudio.js hit(kind) gains (0.25-0.35): head 1650+2480 Hz with a click; body 420 Hz triangle; leg 260 Hz; armor 1100+1900 Hz; wall 900 Hz; ability bandpass noise. killConfirm adds a 90 Hz thump. Also add ui('multi',n), ui('ace'), ui('clutch'), ui('gate'), ui('tick').\n\nNew src/moments.js MomentTracker(world), called from the end of main.onKill and from onRoundStart/onRoundEnd:\n- roundKills 2/3/4/5 gives DOUBLE/TRIPLE/QUAD/ACE. ACE needs enemy squad size >=3.\n- TRADE: lastKill[squad]={killerId,t}, valid within 4 s.\n- FIRST BLOOD on the m.firstBloodDone transition.\n- Clutch: after a kill, if a squad has 1 alive vs >=2, set clutch={char,vs} and show #clutch-chip '1vN' (player squad only).\n- onRoundEnd: CLUTCH 1vN, FLAWLESS, CLOSE DEFUSE (<2 s left).\n- The player's own moments go to hud.moment(title,sub,tier) in #moments (max 3 cards, 2.4 s, timer list in hud.update, no setTimeout). Other players' ACE/CLUTCH become a sys callout.\n\nmatch.js:\n- endRound banner title priority: ACE > CLUTCH 1vN > ROUND WIN/LOSS. Delete the redundant 'SPIKE DEFUSED' banner in defuse().\n- Play audio.ui('gate') in startCombat, ui('tick') in the last 5 s of buy, and a double beep at 30 s/10 s left. In the spike's final 10 s, #timer gets class 'urgent'.\n- Slow-mo: only in endRound with reason==='elim' when the last kill was by world.viewTarget within 0.3 s. Set world.slowmoUntilReal = now+0.45 s; Game.frame calls update(dt*(slowmo?0.35:1)).\n\nhud.toast(msg,dur,prio=0): a higher-priority toast is not overwritten; announceUlt uses prio 2.",
+          "filesOwned": [
+            "src/moments.js",
+            "src/models.js",
+            "src/character.js"
+          ],
+          "sharedFileEdits": [
+            "src/main.js: onDamage body; onKill tail call to moments; remove hitMarker from traceShot/meleeAttack; frame() timeScale; onRoundStart/onRoundEnd calls",
+            "src/audio.js: hit(kind), killConfirm thump, pain, heartbeat, bodyFall, new ui() cases",
+            "src/hud.js: moment(), clutch chip, toast prio, heartbeat overlay",
+            "src/match.js: endRound banner priority, defuse banner removal, gate/tick/urgent cues, slow-mo trigger",
+            "src/abilities.js: srcPos on the fire damage info only",
+            "index.html: #moments, #clutch-chip",
+            "src/style.css: moment card, clutch chip, .urgent pulse"
+          ],
+          "newFiles": [
+            "src/moments.js"
+          ],
+          "contracts": [
+            "Game.moments (MomentTracker) with onKill(victim,killer,info), onRoundStart(), onRoundEnd(winSquad)",
+            "hud.moment(title, sub, tier)",
+            "hud.toast(msg, dur, prio)",
+            "audio.hit(kind) where kind is in head|body|leg|armor|wall|ability",
+            "info.armorHit, info.pen, info.srcPos on takeDamage info",
+            "Character: aces, clutches, clutchAttempts, multi{2..5} counters (never reset per round)",
+            "Game.timeScale (1 normally)"
+          ],
+          "acceptance": [
+            "A Shock Dart or Orbital hit shows a marker and tick; molly damage gives at most 4 markers per second",
+            "Head, body, leg, armor and wallbang hits sound distinct; a kill plays thump+chime and never tick+chime",
+            "Two kills show DOUBLE KILL; 5 show ACE as the round banner title",
+            "Last alive vs 3 shows a 1v3 chip that updates; winning shows CLUTCH 1v3",
+            "The round-winning player kill gives slow-mo that returns to 1 within 1 s real time; killing the last attacker after a plant does not trigger it",
+            "A shot enemy flinches; a dead one falls away from the shooter"
+          ],
+          "effort": 4,
+          "risk": 2
+        },
+        {
+          "id": "W1-ballistics",
+          "title": "Streak tracers, material impacts, whiz-by suppression, visible recoil and blast shake",
+          "mergedFrom": [
+            "feel-3",
+            "feel-4"
+          ],
+          "summary": "Bullets are fast visible streaks. Walls puff dust, crates splinter, floors kick sand and penetrations spark, each with a sound. Rounds snapping past your head crack from the correct side and darken your vision. The crosshair climbs with recoil, and explosions shake the camera according to distance.",
+          "spec": "effects.js:\n- Streaks: one InstancedMesh(BoxGeometry(1,1,1), additive MeshBasicMaterial with depthWrite false, capacity 96), frustumCulled=false, instanceColor. Keep a Float32Array ring buffer {from,dir,len,t0,thick}.\n  - update(): head=min(len,(now-t0)*240) and tail=max(0,head-5). Compose with module-scratch Quaternion/Vector3. Dead slots get scale 0.\n- tracer(from,to,color,thick) keeps its name and signature but uses the pool.\n- ParticlePool: InstancedMesh with capacity 400 that recycles the oldest slot. burst() and blood() use it, with no per-chip Mesh or Vector3.\n- impact(point,normal,ch,exit) by material: '#' dust 0xd8c8a8 plus 3 pooled dust quads; null (floor) sand 0xc9b48a; 'c'/'C' wood chips 0x8e6038; 'P' green; exit=true adds 6 additive sparks.\n- Pool blast() spheres (8 shared).\n\nmain.js traceShot:\n- Remove the 80% random tracer skip. Non-local shots always draw: ally 0xcff6ff, enemy COLORS.enemy, thick 0.02. The player's own shots draw 40% of the time at 0.01.\n- Pass mh.ch and an exit flag to impact().\n- Whiz: if vt=this.viewTarget is alive, char.squad!==vt.squad, and the shot did not hit vt, compute the ray's closest approach to vt.eyePos(). If d<1.8 and 1.5<t<endT, and 80 ms have passed since the last whiz, call audio.whiz(passPoint,d), hud.suppress(0.3) and camfx.addTrauma(0.05).\n\naudio.js:\n- impact(pos,kind) via spatial(); skip if dist>28 or over 14 per second.\n- whiz(pos,d): 90 ms bandpass sweep 5500->1600 Hz plus a 2.6 kHz snap, panned.\n\nhud.suppress(a) drives #suppress-overlay (inset dark vignette, decays 1.5/s, placed before #flash-overlay).\n\nNew src/camerafx.js CameraFX:\n- trauma (decay 1.6/s), fovKick (decay 10/s).\n- addTrauma(a); addTraumaAt(pos,a,radius) with (1-d/r)^2 falloff measured from the view target; addFov(deg).\n- update(dt,scale) writes p, y and r from sines at 7/11/13 Hz times trauma^2 (1.4 deg pitch/yaw, 1 deg roll). No allocations.\n\nGame:\n- this.camfx=new CameraFX().\n- updateCamera: rv = vt.isPlayer ? settings.gameplay.recoilView : 0.3, replacing the 0.3 recoil factor. Add camfx offsets and the fov kick, scaled by settings.gameplay.screenShake. Reset in onRoundStart.\n- Triggers: Match.detonate addTraumaAt(s.pos,1,45); orbital strike detonation (0.8,18); shockdart onEnd (0.5,10); own marshal 0.2 and operator 0.35; tailwind addFov(8); updraft addFov(5). No shake when the player is merely hit.\n\nsettings.js DEFAULTS.gameplay: screenShake:0.7 and recoilView:1. Add two sliders in settings-ui's Gameplay page.",
+          "filesOwned": [
+            "src/effects.js",
+            "src/camerafx.js"
+          ],
+          "sharedFileEdits": [
+            "src/main.js: the tracer/impact/whiz lines inside traceShot; updateCamera recoil and camfx; onWeaponFired sniper trauma; construct camfx",
+            "src/audio.js: new impact() and whiz() functions only",
+            "src/hud.js: suppress() and its decay in update",
+            "src/match.js: one camfx line in detonate",
+            "src/abilities.js: one camfx line each in the orbital detonation, shockdart onEnd, tailwind and updraft",
+            "src/settings.js: screenShake, recoilView defaults",
+            "src/settings-ui.js: two range rows",
+            "index.html: #suppress-overlay",
+            "src/style.css: #suppress-overlay"
+          ],
+          "newFiles": [
+            "src/camerafx.js"
+          ],
+          "contracts": [
+            "effects.tracer(from,to,color,thick)",
+            "effects.impact(point,normal,ch,exit)",
+            "effects.burst() is pooled (signature unchanged)",
+            "Game.camfx.addTrauma(a), addTraumaAt(pos,a,radius), addFov(deg)",
+            "audio.whiz(pos,d), audio.impact(pos,kind)",
+            "hud.suppress(amount)",
+            "settings.gameplay.screenShake, settings.gameplay.recoilView"
+          ],
+          "acceptance": [
+            "Shooting a wall, a crate and the floor gives dust+thud, splinters+'tok' and a sand kick; scene.children stays flat over 200 shots",
+            "A bot firing at the player from 30 m shows a tinted streak and a correctly panned whiz with a suppression vignette; a miss 5 m away does nothing",
+            "With recoilView=1, the camera pitch offset follows weapon recoil and recovers after release; 0.3 restores the old feel",
+            "Spike detonation near the view target shakes strongly; screenShake=0 disables all shake",
+            "A 10-character firefight holds 60 fps"
+          ],
+          "effort": 4,
+          "risk": 2
+        },
+        {
+          "id": "W1-economy",
+          "title": "Team economy planner: pistol/eco/force/half/full, rifle drops, loss-bonus pips",
+          "mergedFrom": [
+            "tac-6",
+            "ai-7"
+          ],
+          "summary": "Both teams buy as a team. Rich bots drop rifles to poor teammates, you included, and you can request a drop. Loss-bonus pips and the team plan label let you read both economies.",
+          "spec": "New src/economy.js, export planBuy(match, chars, squad) -> 'pistol'|'eco'|'force'|'half'|'full'.\n- avg = mean credits of the squad (human included). kept = alive survivors holding a primary. loss = match.lossStreak[squad].\n- Order: 'pistol' if round===1 or the first round of a half; 'full' if avg>=3900 or (kept>=3 and avg>=2400); 'eco' if avg<2000 and loss<3 and not match point; 'force' if avg<3000; otherwise 'half'.\n- If match.planOverride?.[squad] is set (written later by W4-comms), return it unless round===1.\n\nmatch.js startRound: after resetForRound and before world.onRoundStart(), set this.plans=[planBuy(this,chars,0), planBuy(this,chars,1)].\n\nbot.js BotController.buy() reads w.match.plans[c.squad]:\n- eco: no primary; a light shield only if credits-400>=1000; at most 1 ability charge (a Duelist may buy a Sheriff).\n- force: the best affordable of phantom/vandal, bulldog, spectre, sheriff, plus a light shield.\n- half: a rifle only if credits>=3400, else spectre or sheriff.\n- full/pistol: existing logic minus the per-bot coin flips.\n- Run the ability-dump loop only for full/pistol.\n- Second pass at buyAt+1.5 s: if the plan is full and credits>=2900+1000 after buying, call w.buyFor(c, poorestAllyWithoutPrimary, c.agent prefers phantom else 'vandal'). Bots come first, then the human.\n\nmain.js Game.buyFor(giver, receiver, id):\n- Requires phase==='buy', giver.credits>=cost and receiver.slots.primary empty.\n- Debit the giver, call receiver.giveWeapon(id) (or the equivalent used by buyWeapon), and set its boughtRound=-1 so it cannot be refunded.\n- Callout '<giver>: dropped you a Vandal' when the receiver is the player, otherwise '<giver> dropped <gun> for <receiver>'.\n\nGame.requestDrop(): the richest ally bot that can afford it honours the request within 1 s. In the buy menu (#buy-team), add a 'Request' button with data-buy='drop' that calls it through the existing clickCursor handler.\n\nHUD:\n- #topbar gets 3 .lb-pip spans per team next to #score-ally and #score-enemy, lit from match.lossStreak.\n- The #buy-team h4 reads 'TEAM · FULL BUY / ECO / FORCE / HALF / PISTOL'.\n- Round banner sub 'ECO ROUND - save credits' for the player's squad on eco.",
+          "filesOwned": [
+            "src/economy.js"
+          ],
+          "sharedFileEdits": [
+            "src/bot.js: BotController.buy() body only",
+            "src/match.js: one line setting this.plans in startRound",
+            "src/main.js: new methods buyFor and requestDrop",
+            "src/hud.js: renderBuy team header plus the request button; topbar pips update",
+            "index.html: pip spans",
+            "src/style.css: .lb-pip, request button"
+          ],
+          "newFiles": [
+            "src/economy.js"
+          ],
+          "contracts": [
+            "planBuy(match, chars, squad) exported from src/economy.js",
+            "match.plans[squad]",
+            "match.planOverride[squad] (optional, read by planBuy)",
+            "Game.buyFor(giver, receiver, weaponId) -> bool",
+            "Game.requestDrop(char)"
+          ],
+          "acceptance": [
+            "Over a match each squad logs at least one eco/force round and one full round in match.plans",
+            "After a full buy, a rich bot gives a poor teammate a rifle in the buy phase and a callout appears",
+            "Pressing Request as a poor player yields a rifle when an ally can afford it",
+            "Loss pips update every round and reset at halftime and overtime",
+            "On eco rounds the bots' average bank stays at 2000 or more"
+          ],
+          "effort": 3,
+          "risk": 2
+        }
+      ]
+    },
+    {
+      "name": "Wave 2 - Utility and sound as information",
+      "goal": "Make utility aimed and committed, make bot utility work as combos, and make sound a real information channel for the player and the bots.",
+      "packages": [
+        {
+          "id": "W2-throw",
+          "title": "Equip-and-aim utility: arc preview, lob alt-fire, cast commitment, delayed-pop flashes with team flash",
+          "mergedFrom": [
+            "tac-1",
+            "agents-1",
+            "ux-3"
+          ],
+          "summary": "Pressing Q/C/E for a throwable lowers your gun and shows the exact arc and landing ring. LMB throws, RMB lobs underhand, and pressing the same key again or a weapon key cancels it. After a throw you cannot shoot for a moment. Flashes pop 0.3 s after landing, so you can turn away, and a careless flash also blinds your own team.",
+          "spec": "config.js AGENTS ability entries: add aim:'throw' (cloudburst, hothands, curveball, flare, slowfield, shockdart, recon), aim:'place' (shroud, tripwire, orbital), and aim:'self' for every other ability.\n\nsettings.js DEFAULTS.gameplay: abilityMode:'equip' ('equip'|'quick') and teamFlash:'reduced' ('full'|'reduced'|'off'). Add two select rows in settings-ui.\n\nabilities.js:\n- use(char,key,target=null,opts={}): store this._opts=opts so lobVel/aimDir can read opts.lob (speed x0.55, vy+4 when the target is null).\n- Factor out launchSpec(char,key,lob,target) -> {pos,vel,gravity,bounce,landOnFloor,stick,fuse}, used by both the throw functions and the preview.\n- Move the per-projectile body of update() into stepProjectile(p,dt), and run it with a fixed 1/60 substep accumulator.\n- simulateArc(char,key,lob,outF32,maxSteps=180) runs the same stepProjectile on a scratch record and returns {count,end} (a reused Vector3).\n- previewArc(char,key,lob): one preallocated THREE.Line (Float32Array 180*3, setDrawRange) plus a ring mesh tinted the agent colour, red when invalid (tripwire beyond 14 m). Re-simulate only every 50 ms or when yaw/pitch change by more than 0.3 deg. hidePreview(). Both objects are excluded from clear().\n- Cast commitment: after a successful non-X use, char.equipEnd=max(char.equipEnd, time+CAST[aim]) with throw .45, place .6, self .15. This applies to bots too.\n- curveball/flare onEnd: push {pos,owner,at:time+0.3} to this.pendingPops and play audio.ability('flashcharge'). update() pops due entries via flashAt. clear() empties the list.\n- flashAt(pos,owner): loop over all alive chars. Enemies get the full duration. Allies get x0.6 ('reduced') or are skipped ('off'). The owner always gets x0.6 when facing the flash. Then call this.world.brain?.onFlashPop?.(owner,pos).\n- addFire hurts allies at 50%, never the owner.\n\nplayer.js:\n- In equip mode, a non-X key on an aim:'throw'/'place' ability with canUse true sets this.ready=key and char.utilReady=true.\n- The same key, a weapon slot key, wheel scroll, death or a phase change cancels with no charge spent. Never use Esc, because it unlocks the pointer.\n- While ready, skip firing, zoom and reload, and call previewArc each frame. leftEdge calls use(c,ready,null,{lob:false}); rightEdge passes lob:true. Clear afterwards.\n\nviewmodel.js: while char.utilReady, hold the gun lowered.\n\nhud.js: #util-hint shows '<ability> · LMB throw · RMB lob · <key> cancel'.",
+          "filesOwned": [
+            "src/abilities.js",
+            "src/player.js",
+            "src/viewmodel.js"
+          ],
+          "sharedFileEdits": [
+            "src/config.js: aim field on each ability",
+            "src/settings.js: abilityMode, teamFlash",
+            "src/settings-ui.js: two rows",
+            "src/hud.js: #util-hint toggle",
+            "src/audio.js: 'flashcharge' case in ability()",
+            "index.html: #util-hint",
+            "src/style.css: #util-hint"
+          ],
+          "newFiles": [],
+          "contracts": [
+            "abilities.use(char, key, target=null, opts={lob})",
+            "abilities.launchSpec(char,key,lob,target)",
+            "abilities.simulateArc(char,key,lob,outF32,maxSteps) -> {count,end}",
+            "abilities.stepProjectile(p,dt)",
+            "abilities.pendingPops",
+            "world.brain.onFlashPop(owner,pos) is invoked when any flash pops (optional hook)",
+            "char.utilReady, char.equipEnd as cast lock",
+            "settings.gameplay.abilityMode, settings.gameplay.teamFlash",
+            "AGENTS[*].abilities[k].aim in throw|place|self"
+          ],
+          "acceptance": [
+            "The ring is within 0.5 m of the real landing point for LMB and RMB with hothands, slowfield and cloudburst",
+            "fireWeapon returns false for about 0.45 s after any throw by a bot or the player",
+            "abilityMode 'quick' restores instant use; self abilities (tailwind, stim, heals) stay instant",
+            "Turning away within 0.3 s of a flare landing reduces the blind; an ally facing it gets a reduced blind",
+            "No preview remains after death or a round restart; 60 fps holds with the preview active"
+          ],
+          "effort": 4,
+          "risk": 3
+        },
+        {
+          "id": "W2-sound",
+          "title": "Sound propagation: wall occlusion, loudness-based hearing, spike/reload/utility cues",
+          "mergedFrom": [
+            "tac-4",
+            "ai-6",
+            "feel-1",
+            "tac-5",
+            "feel-5"
+          ],
+          "summary": "Sounds behind walls are muffled and carry less far. Walking and suppressed Ghost/Phantom keep you hidden, and bots hear a rough direction rather than your exact head. You hear plants and defuses start, tick, cross halfway and stop, as well as enemy reloads, molly crackle, orbital sirens and flash fuses. Bots react to all of these, so tap-defusing baits peeks and a heard plant pulls rotations.",
+          "spec": "config.js:\n- WEAPONS loud (m): ghost 26, phantom 30, classic/sheriff 45, spectre 50, bulldog/vandal/guardian 58, marshal 65, operator 80, knives 12.\n- SOUND={step:16, land:14, reload:12, equip:8, plant:40, defuse:36, util:25}.\n\nmap.js occlusion(a,b): an allocation-free XZ grid DDA. Count runs (open->solid transitions where height>=2.2) and solid cells, each capped at 4. Return a reused {runs,cells}.\n\nmain.js emitSound(src,pos,radius,kind):\n- For each alive bot of the other squad (all bots if src is null): d = straight-line distance; skip if d>radius. o=map.occlusion(pos, b.char.eyePos()); cost = d + 12*o.runs + 2*o.cells; skip if cost>=radius.\n- Jitter pos by 0.5+0.12*cost+(o.runs?3:0) m into a scratch vector.\n- Queue {bot,pos clone,kind,q:1-cost/radius,at:t+rand(.12,.3)} in a fixed-size pending array drained in update().\n- Replace the loops in onWeaponFired (radius def.loud), onFootstep and onLand.\n\nbot.js hear(pos,kind,q=1):\n- alert for (q<.35 ? 1.2 : 2.5) s.\n- A holding defender with no target sets holdLookOverride toward pos for 2 s.\n- 'plantStart' (defenders): brain.onPlantHeard(pos) sets hotSite and rotated, and sends the 2 nearest off-site defenders to that site via assignHold.\n- 'defuseStart' (attackers, spike planted, no target): after reaction*1.2 s, chase toward s.pos.\n- 'defuseHalf': every attacker within 20 m sets lastKnown=s.pos and chase=true.\n\nmatch.js combat update: keep this.cueActors (Map char.id->{type,next,half}).\n- A new plant/defuse action fires world.onSpikeCue(type+'Start',c).\n- Ticks every 0.5 s (plant) or 0.35 s (defuse).\n- 'defuseHalf' fires the first time progress crosses defuseTime/2.\n- An id whose c.action is gone fires 'cancel' and is deleted. Clear the map in startRound and endRound.\n\nmain.onSpikeCue(kind,c): audio.spikeCue(kind,c.pos). Start/Half kinds also call emitSound with SOUND.plant/defuse. Plant/defuse starts also call brain.report(enemySquad,c,c.pos,null).\n\ncharacter.js: poll reload progress at 0.16/0.62/0.9 and call audio.reloadPhase for non-view-target chars (spatial, skipped beyond 14 m). The first phase calls world.emitSound(this,pos,SOUND.reload,'reload'). Equip sounds work the same way at 8 m.\n\naudio.js:\n- spatial(pos) also returns muffle: o=occlusion(cam,pos lifted +1 m), g*=1/(1+0.8*runs).\n- out(): when muffled, insert a 700 Hz lowpass before the panner and halve wet.\n- Voice budget: count active sources; above 56, drop world sounds with gain<0.05.\n- spikeCue kinds: plantStart, plantTick, defuseStart, defuseTick, defuseHalf, cancel.\n- ability cases 'crackle' (molly, every 0.12-0.3 s), 'siren' (orbital wind-up), 'fuse' (in-flight flash beeps). Triggered from abilities.update with small edits.\n\nhud.js: a minimap pulse ring at the jittered position for cues heard within 36 m.",
+          "filesOwned": [
+            "src/audio.js",
+            "src/match.js",
+            "src/character.js"
+          ],
+          "sharedFileEdits": [
+            "src/map.js: new occlusion(a,b) method only",
+            "src/main.js: emitSound, the pending-sound drain in update, onSpikeCue; replace the hear loops in onWeaponFired/onFootstep/onLand",
+            "src/bot.js: BotController.hear() body plus new TeamBrain.onPlantHeard",
+            "src/config.js: loud on WEAPONS, SOUND table",
+            "src/abilities.js: three small calls (crackle, siren, fuse) inside update",
+            "src/hud.js: minimap cue ring"
+          ],
+          "newFiles": [],
+          "contracts": [
+            "map.occlusion(a,b) -> reused {runs,cells}",
+            "Game.emitSound(src, pos, radius, kind)",
+            "Game.onSpikeCue(kind, char)",
+            "BotController.hear(pos, kind, q)",
+            "TeamBrain.onPlantHeard(pos)",
+            "SOUND config table and WEAPONS[id].loud",
+            "audio.spatial(pos) returns muffle; audio.spikeCue(kind,pos)"
+          ],
+          "acceptance": [
+            "A shot behind a wall sounds lowpassed and quieter than an open shot at the same distance",
+            "A Ghost/Phantom shot 35 m away through a wall is not heard by bots; a Vandal shot is, with an alert point 3-8 m off",
+            "Shift-walking within 10 m behind a wall never calls hear()",
+            "A bot planting within 30 m produces ticks that pan correctly; defending bots off-site rotate within about 3 s",
+            "Tap-defusing for 2 s makes a post-plant bot peek; the halfDone checkpoint behaviour is unchanged",
+            "At 8 m an enemy reload is audible; no frame-time regression in a 10-character firefight"
+          ],
+          "effort": 5,
+          "risk": 3
+        },
+        {
+          "id": "W2-botutil",
+          "title": "Bot utility playbook with flash-then-swing and smoke-then-push combos",
+          "mergedFrom": [
+            "ai-2",
+            "agents-9",
+            "tac-2"
+          ],
+          "summary": "Bots use their whole kit like a team: a teammate swings into the white-out a beat after a flash, smokes go down before the push, Gale updrafts to off-angles, Warden slows the retake path, Echo recons before entering, and defenders re-smoke as a push develops. Bots also swing off YOUR flashes.",
+          "spec": "Rewrite only BotController.useAbilities and add helpers in bot.js.\n\nconfig.js DIFFICULTY.*.combo: easy 0, normal .6, hard 1.\n\nutilPhase(): 'default' (attack before execute, or defence before hotSite); 'execute'; 'contact' (defence with hotSite or known enemy); 'postplant' (attack, planted); 'retake' (defence, planted).\n\nPLAYBOOK[agentId][phase] = [{key, when(bot,ctx)->target|null, cd}]. ctx is built once per call: {site, known, spike, intel}. Per-bot utilCd[key] holds the next allowed time (default cooldown 6 s). Remove usedExecUtil and the random 35% flash branch.\n\nMinimum entries:\n- shade: execute E at map.execSmokes(site)[0], then [1] 1.5 s later; contact E on known; retake E between the spike and the nearest attacker intel.\n- gale: execute Q at execSmokes[0] only within 17 m with LOS; updraft at execute when within 8 m of a 'C' cell on site (40%).\n- warden: defender contact Q on known; retake Q at the spike when no defuse is active; attack execute Q at site.center.\n- echo: retake E (recon) at the spike from 18 m; execute E at site center; Q flash via flashPop.\n- ember: Q flash via flashPop; postplant C on the spike when defuseProgress>0.\n\nflashPop(threatPos): try yaw offsets [0,±12,±25,±40] deg around the bearing with pitch +4. hit=map.raycast(eye,dir,7.6). P = hit ? point-dir*0.15 : eye+dir*7.6. Score = 3*lineOfSight(P,threat+1.5) + (dist<8) - 5*(P within 1.5 m of the eye). Use module scratch vectors.\n- Ally safety: skip if any ally is within 15 m and within ±30 deg of the chosen direction (W2-throw makes team flash real).\n- Throw with abilities.use(c,'Q',eye+dir*10). Flash only when !target && known && dist<22 && Math.random()<diff.combo.\n- The thrower sets avertUntil=t+0.6 and aims away from P.\n\nTeamBrain.onFlashPop(owner,pos) (called by abilities.flashAt): up to 2 alive target-less ally bots of owner within 16 m (prefer a Duelist, not the thrower) call setSwing(pos,0.3,1.4) (from W1-trades). Only if diff.combo>0. If the owner is the player, post the callout '<bot>: swinging your flash'.\n\nSmoke-push: on execute, non-carrier attackers wait at stage until a smoke within 4 m of chokes[0] is 0.6 s old (cap 3 s).\n\nPunish blindness: in perceive, a new target with blindUntil>t+0.4 gets reactionEnd=t+0.1.\n\nEco discipline: if match.plans[squad]==='eco', keep 1 charge of C/Q except in retake/postplant.\n\nCallouts for squad 0 only ('Nova: flashing A Main'). Keep the 0.5 s nextAbility cadence.",
+          "filesOwned": [
+            "src/bot.js"
+          ],
+          "sharedFileEdits": [
+            "src/config.js: DIFFICULTY.*.combo"
+          ],
+          "newFiles": [],
+          "contracts": [
+            "TeamBrain.onFlashPop(owner, pos)",
+            "BotController.utilPhase()",
+            "BotController.flashPop(threatPos)",
+            "PLAYBOOK table in bot.js (W3 packages may add entries)",
+            "bot.utilCd[key]",
+            "DIFFICULTY[x].combo"
+          ],
+          "acceptance": [
+            "On Hard, at least 60% of bot flashes are followed within 1.2 s by a teammate swing",
+            "No bot flash pops within 1.5 m of its thrower, and at least 70% of pop points have LOS to the threat",
+            "A player flash near a target-less ally bot produces a swing and a callout",
+            "Over a Normal match every agent's C, Q and E are each used by bots at least once",
+            "A Shade execute places two different smokes; Easy throws no combos"
+          ],
+          "effort": 3,
+          "risk": 2
+        }
+      ]
+    },
+    {
+      "name": "Wave 3 - Team intelligence",
+      "goal": "Give the bots readable round plans on attack and defence, real post-plant and retake play with saves, and respect for the player's utility (dodging hazards).",
+      "packages": [
+        {
+          "id": "W3-playbook",
+          "title": "Attack playbooks and defender setups with memory of the player's habits",
+          "mergedFrom": [
+            "ai-1",
+            "tac-3",
+            "tac-9",
+            "map-3",
+            "ai-7",
+            "ux-8"
+          ],
+          "summary": "Each round the enemy chooses default, fast hit, split through mid, lurk or fake, remembers where you stacked and hits the weaker site. Defenders rotate between standard, stack and an aggressive mid info peek that falls back. Your own bot teammates announce the plan in the buy phase, and when you walk into a site's main they commit to it with you.",
+          "spec": "New src/playbook.js. TeamBrain is the single plan owner.\n\nconfig.js:\n- ATTACK_PLANS={default:.35,fast:.15,split:.2,lurk:.15,fake:.15}\n- DEF_SETUPS={standard:.5,stack:.25,aggro:.25}\n- DIFFICULTY.*.adapt: 0 / .5 / 1\n\nmap.js poi:\n- sites.A.approaches=[{id:'main',stage:[37,22],choke:[37,18]},{id:'link',stage:[23,19],choke:[29,13]}]\n- sites.B.approaches=[{id:'main',stage:[5,22],choke:[5,18]},{id:'link',stage:[22,19],choke:[15,13]}]\n- poi.lurk={A:[5,24], B:[37,24]} (the other main)\n- sites.A.plants=[[35,12],[38,12],[33,9]] and sites.B.plants=[[6,12],[8,9],[10,13]]\n- Extend validatePoi to warn on any non-walkable authored cell.\n\nTeamBrain:\n- memory=[{A:0,B:0},{A:0,B:0}] keyed by the attacking squad; defMemory keyed by the defending squad; seenZone=new Map().\n- report(): an enemy defender seen in a site/back zone sets seenZone(enemy.id) once.\n- onRoundEnd(winSquad) (called from Game.onRoundEnd): decay x0.7, then add 1 per seenZone entry and 0.5 per attacker death zone. defMemory[planted site]+=1.\n- Move the atkSite pick from reset() into onRoundStart: p(site) ∝ 1/(1+adapt*memory[site]). Never pick the same site 3 rounds in a row.\n- Plan by weight. Force 'default' when fewer than 3 attacker bots are alive, or when adapt===0 (Easy). this.playerPlan, if set, wins for squad 0.\n- Jobs: lurker = Warden or Sentinel, else random; carrier = the spike holder.\n  - default: executeAt=combatStart+rand(22,30)\n  - fast: rand(5,9)\n  - split: 2 bots stage on the link approach\n  - lurk: one bot walks (c.walking) to poi.lurk and pushes the link 6 s after execute\n  - fake: at t+rand(8,10), set atkSite to the other site once, clear siteSpot/_stage/path for all attackers, executeAt=t+10; suppress the contact-execute rule until then\n- Sync: execute also fires when every non-lurk bot is within 3 m of its stage and combat is at least 8 s old. goAt[approach]=execute+min(3,(lenLongest-len)/5.4).\n- Follow the human (squad 0, attack): from t0+8 s, every 2 s until execute, if zoneName(player.pos) starts with 'A ' or 'B ', switch atkSite there, clear stage caches, set executeAt=max(executeAt, now+6) capped at t0+38, and post callout '<bot>: with you on B'.\n- Defence: choose a setup. If adapt>0 and max(defMemory)>=1.5, raise the stack weight to .5 on the favoured site.\n  - stack: order [fav,fav,fav,'mid',other]\n  - aggro: one bot (Gale/Echo preferred) gets b.aggro={pos:mid choke, until:combatStart+rand(10,16)}; it returns to holdPos on damage or timeout\n  - Use a per-round shuffle offset for angle indices\n- Buy-phase briefing for squad 0: attack 'Plan: Split A - Rook lurks B'; defence 'A: Nova · B: Rook, Kai · Mid: Jett'. Gated by settings callouts.\n\nchooseGoal: the stage branch reads b.approach/b.stageCell; aggro handling goes in the defender hold branch. BotController.reset() clears _stage and _stageKey.",
+          "filesOwned": [
+            "src/playbook.js"
+          ],
+          "sharedFileEdits": [
+            "src/bot.js: TeamBrain reset/onRoundStart/onCombatStart/update execute logic, new onRoundEnd; chooseGoal attacker stage branch and defender hold branch; BotController.reset stage cache clear",
+            "src/map.js: poi additions plus validatePoi extension",
+            "src/config.js: ATTACK_PLANS, DEF_SETUPS, DIFFICULTY.adapt",
+            "src/main.js: brain.onRoundEnd(winSquad) call in onRoundEnd"
+          ],
+          "newFiles": [
+            "src/playbook.js"
+          ],
+          "contracts": [
+            "TeamBrain.plan {id, site}, TeamBrain.playerPlan (null or plan id like 'splitA'), TeamBrain.onRoundEnd(winSquad)",
+            "TeamBrain.setAttackSite(site, executeDelay) - resets stage caches (used by W4-comms orders)",
+            "bot.job in 'lurk'|'carrier'|'split'|'entry'; bot.approach",
+            "map.poi.sites[X].approaches, .plants; map.poi.lurk",
+            "DIFFICULTY[x].adapt"
+          ],
+          "acceptance": [
+            "Over 30 rounds at least 3 plan ids appear and no site is attacked 3 rounds running",
+            "On Hard, after A attacks die there 3 rounds in a row, B is attacked in at least 60% of the next 5",
+            "In a fake round atkSite flips exactly once between t+8 and t+14 s and no bot walks to a stale spot",
+            "A lurker stays more than 22 m from the site until execute+5 s and emits no footsteps while walking",
+            "Defenders use all three setups over 20 rounds; an aggro bot falls back after taking damage",
+            "The player's attacking bots announce the plan and follow the player into B Main"
+          ],
+          "effort": 4,
+          "risk": 3
+        },
+        {
+          "id": "W3-postplant",
+          "title": "Post-plant crossfires, gathered retakes, fake/tap defuses and saves",
+          "mergedFrom": [
+            "ai-5",
+            "tac-7",
+            "map-7"
+          ],
+          "summary": "After the plant, attackers spread into LOS crossfires and punish your defuse. Defenders gather and then retake together from two lanes with utility and one trailing defuser, and bots tap or fake the defuse. Hopeless bots save their rifles, and you get a 'Save your Vandal' hint in the same situation.",
+          "spec": "map.js poi:\n- sites.A.retake=[[34,4],[23,12]] and sites.B.retake=[[9,4],[20,13]]\n- sites.A.posts=[{at:[39,19]},{at:[30,14]},{at:[31,7]}] and sites.B.posts=[{at:[3,18]},{at:[13,13]},{at:[1,7]}]\n- Include them in validatePoi.\n\nPlant spot (chooseGoal carrier branch): pick from site.plants (W3-playbook data), skipping cells a fresh defender intel (under 1.2 s, within 12 m) has LOS to. Wait up to exec+8 s. Fall back to the old random choice.\n\nTeamBrain.onPlant(site) (called from Game.onSpikePlanted):\n- Build attacker slots: start from the authored posts; if fewer than 3, add scanned walkable cells 6-12 m from spike.pos with lineOfSight(cell+1.6, spike+0.5). Greedy pick 3 with bearings >=60 deg apart and assign by distance. b.postSpot=slot.\n- While planted, attackers chase only if lastKnown is within 8 m of their slot. They walk while time left > 28 s.\n- Defuse alarm (spike.defuseProgress>0 or the W2 'defuseStart' hear): utility at the spike via PLAYBOOK postplant entries; the 2 nearest attackers setSwing(spike.pos, reaction+0.3, 2).\n- Retake: this.retake={state:'rally'|'go', site, defuserId}.\n  - Each defender bot goes to the nearest retake cell.\n  - Switch to go when min(3,alive) bots are within 7 m of their cell, or when timeLeft <= need+4, where need = pathLen(nearest,spike)/5.4 + 7 + 3. Also go when a human defender is within 12 m of the spike.\n  - Callout 'Retaking A!'.\n  - On go, entries are staggered by 0.6 s and use PLAYBOOK retake utility.\n  - The defuser is the healthiest bot. It moves after 0.6 s and starts the defuse only when no target has been seen for 0.7 s and a mate is within 8 m, or when it is desperate (keep the existing rule). Reassign on death.\n- Tap/fake (diff.combo>=.6): if an enemy is known within 15 m and !halfDone, start the defuse and cancel after rand(1,1.6) s. If there is no intel and the spike is smoked, defuse to 3.6 s (checkpoint) then step 4 m away.\n\nSaves, BotController.shouldSave():\n- Attackers: no plant, alive<=2 vs >=3, or match.timer < 12 + carrierPath/5.4; and the primary costs >=2000.\n- Defenders: timeLeft < need.\n- Goal 'save': a far T/D cell, walk:true, fight only within 8 m. Callout 'Rook: saving' for squad 0.\n- The player gets hud.hint 'Save your <gun>' under the same test.",
+          "filesOwned": [],
+          "sharedFileEdits": [
+            "src/bot.js: new TeamBrain.onPlant + retake state + update hook; chooseGoal planted branches (attack post, defence rally/go/defuser), the carrier plant-cell pick, new shouldSave + save goal",
+            "src/map.js: retake/posts data and validatePoi entries",
+            "src/main.js: brain.onPlant(site) call in onSpikePlanted",
+            "src/hud.js: save hint line in updateHint"
+          ],
+          "newFiles": [],
+          "contracts": [
+            "TeamBrain.onPlant(site)",
+            "TeamBrain.retake {state, site, defuserId}",
+            "BotController.shouldSave()",
+            "bot.postSpot, bot.saving",
+            "map.poi.sites[X].retake, .posts"
+          ],
+          "acceptance": [
+            "After a plant, at least 2 attacker slots have LOS to the spike with at least 60 deg separation, and no attacker strays more than 8 m to chase",
+            "When time allows, defenders gather at retake cells before entering; late retakes still trigger the go fallback and desperate defuses",
+            "Tap-defuses (cancel after 1-1.6 s) happen on Normal/Hard when an enemy is known nearby",
+            "A 1v3 attacker with a rifle and under 12 s left walks to spawn, survives and keeps the rifle next round",
+            "The player sees the save hint in the same situation"
+          ],
+          "effort": 4,
+          "risk": 3
+        },
+        {
+          "id": "W3-hazards",
+          "title": "Hazard awareness: bots dodge mollies, orbitals, slow fields and turn from flashes",
+          "mergedFrom": [
+            "agents-2",
+            "ai-8"
+          ],
+          "summary": "Your molly actually clears a corner, your Orbital flushes defenders off the spike, and on Hard enemies turn away from your flash or stumble back when blinded.",
+          "spec": "abilities.js:\n- hazardAt(pos, squad, out): fill the reused object {danger,x,z,radius,eta} with the worst entry owned by the other squad (XZ distance).\n  - fires: danger 1\n  - strikes: 1, with eta = at - time\n  - slowFields: .35\n  - in-flight projectiles with p.hazard in 'fire'|'dart' whose cached p.landing is within 4 m: .8\n- projectile() computes p.landing once with simulateArc (from W2-throw).\n- flashThreats: a pooled list of {proj, owner} pushed by curveball/flare and removed when they end.\n- No allocations.\n\nconfig.js DIFFICULTY: flashDodge (0 / .3 / .6) and hazardSense (.5 / 1 / 1).\n\nbot.js BotController.update:\n- On the perceive cadence (0.08 s), call hazardAt(c.pos).\n- If danger*hazardSense>=.5, and the bot is not planting with <1 s left, and the defuse is not desperate (reuse the existing formula): set this.escape={pos,until:t+1.2}.\n  - pos = the best of 8 compass points at 5 m that is walkable, reachable by walkLine, and has danger<.2. Cache scratch.\n  - While defusing with an active escape: cancel c.action when danger>=.9 and eta<.8.\n- chooseGoal returns {key:'escape',pos} first.\n- In the target-visible branch, while an escape is active, steer the wish toward escape.pos, skip the counter-strafe zeroing, and keep shooting.\n- Flash dodge: for each threat within 25 m inside the FOV with LOS, roll flashDodge once (WeakSet) and set turnAwayUntil=proj end+0.3, during which aimPoint = eye - (proj.pos - eye).\n- Blind panic (ai-8): while blindUntil>t, back toward the position from 1 s ago (a 4-entry ring buffer at 4 Hz). 30% chance of a 3-round burst at lastKnown.\n- The orb detour skips orbs where danger>.3.\n- A tryShoot fire-rate gate is not needed.",
+          "filesOwned": [],
+          "sharedFileEdits": [
+            "src/abilities.js: new hazardAt, flashThreats, p.landing cache in projectile()",
+            "src/bot.js: escape/flash-dodge/panic block in BotController.update (both target and no-target branches), escape check at the top of chooseGoal, orb detour filter",
+            "src/config.js: DIFFICULTY flashDodge, hazardSense"
+          ],
+          "newFiles": [],
+          "contracts": [
+            "abilities.hazardAt(pos, squad, out) -> out",
+            "abilities.flashThreats",
+            "bot.escape {pos, until}",
+            "DIFFICULTY[x].flashDodge, hazardSense"
+          ],
+          "acceptance": [
+            "Hot Hands under a stationary Normal bot makes it leave the 3.2 m radius within about 1.2 s with under 60 damage taken",
+            "A bot defusing inside an Orbital ring with more than 2 s of defuse left stops and runs before the strike",
+            "Over 20 flashes, about half of Hard blinds are 0.3 s; Easy rarely dodges",
+            "A blinded bot backs away and sometimes blind-fires",
+            "hazardAt allocates nothing and runs at most about 12 times per second per bot"
+          ],
+          "effort": 3,
+          "risk": 2
+        }
+      ]
+    },
+    {
+      "name": "Wave 4 - Command the squad",
+      "goal": "Give the solo player command of the bot team and full-map information, using everything the earlier waves built.",
+      "packages": [
+        {
+          "id": "W4-comms",
+          "title": "Ping, order wheel, buy call, strat chips, callout zones and tactical map with intel ghosts",
+          "mergedFrom": [
+            "tac-8",
+            "ux-1",
+            "ux-2",
+            "map-6"
+          ],
+          "summary": "Tap Z to ping an enemy or a spot. Hold Z for an order wheel (Go A, Go B, Group, Hold, Push, Fall back, Save, Drop) that your bots obey, with acknowledgements. In the buy phase you can pick a team strat and buy call. Hold M for a labelled tactical map. Enemies you or your team spotted leave fading ghosts on the minimap and the big map.",
+          "spec": "settings.js:\n- KEY_ACTIONS: add ['ping','Ping / orders (hold)'] and ['map','Tactical map'].\n- DEFAULTS.keys: ping:'KeyZ', map:'KeyM'.\n\nplayer.js:\n- Add onRelease handling in onKeyUp BEFORE keys.delete.\n- Ping down records pingT0. When it is held for 0.22 s, call hud.openWheel(). While the wheel is open, route mouse dx/dy to hud.wheelMove and skip look, fire and zoom.\n- On release: open wheel -> w.issueCommand(hud.wheelCommit()); short press -> w.contextPing().\n- Close the wheel on death or pointer unlock.\n- Holding map calls hud.setTacMap(true/false), like the scoreboard.\n\nmain.js:\n- contextPing() raycasts from the camera up to 120 m. If an enemy that playerSees is within 4 deg: kind 'enemy', brain.report(0,e,e.pos,null). Otherwise 'go' at the hit point.\n- addPing(kind,pos): a pool of 4 sprites (copy makeSpikeMarker), 6 s life, mirrored in hud.pings. audio.ui('callout') plus the callout 'You: Enemy - <zoneName>'.\n- issueCommand(kind) forwards to brain.command(0,kind,pos).\n\nbot.js TeamBrain.command(squad,kind,pos) sets bot.order={kind,pos,until}. chooseGoal checks the order right after escape/swing. reset() clears it. Acknowledge with a callout after rand(.6,1.2) s.\n- enemy ping: the 2 nearest target-less bots setSwing or holdLookOverride\n- goA/goB (attack): brain.setAttackSite(site,3)\n- group: bots within 30 m follow within 4 m for 12 s\n- hold: hold the current position for 20 s\n- push: executeAt=now (attack) or chase the nearest intel\n- fallback: own stage/spawn for 10 s\n- save: bot.saving=true\n- drop: Game.requestDrop(player)\n\nBuy menu #strat chips (Auto, Default, Rush A, Rush B, Split A, Split B, Lurk) set brain.playerPlan. Buy-call chips (Auto/Full/Force/Eco) set match.planOverride[0], which persists. If the call is made after bots have bought: Eco sells this-round primaries via main.sellWeapon; Full re-runs buy().\n\nmap.js: replace zoneName with a ZONES table (inclusive rects, first match wins, fallback 'Mid'):\n- Defender Spawn r0-4\n- Top Mid c15-28 r5-8\n- Mid Window c19-24 r9-12\n- B Link c11-18 r13-14\n- A Link c25-31 r13-14\n- Mid Door c19-24 r15-17\n- Mid Boxes c19-24 r18-23\n- Connector c25-34 r24-25\n- Mid Bottom c19-24 r24-31\n- B Back c1-13 r6-8\n- A Back c30-42 r6-8\n- B Site c1-13 r9-14\n- A Site c30-42 r9-14\n- B Elbow c1-13 r15-17\n- A Elbow c30-42 r15-17\n- B Main c3-8 r18-25\n- A Main c35-40 r18-25\n- B Lobby c3-8 r26-31\n- A Lobby c35-40 r26-31\n- Attacker Yard r32-33\n- Attacker Spawn r34+\nEach zone has a label cell.\n\nhud.js:\n- Factor drawMapCells(g,map,s,ox,oy) out of buildMinimapBg.\n- #tacmap canvas (min(80vh,80vw), background cached, redrawn at 15 Hz while open): zone labels, site letters, ally dots with a view cone, the spike, smoke arcs, pings, ghosts.\n- Ghosts on both maps: brain.intel[playerSquad] entries aged 0.35-6 s, drawn as hollow red rings with alpha 1-age/6.\n- #wheel: 8 sectors, a 28 px dead zone, a 90 px clamp.",
+          "filesOwned": [
+            "src/player.js"
+          ],
+          "sharedFileEdits": [
+            "src/settings.js: two KEY_ACTIONS and keys defaults",
+            "src/main.js: contextPing, addPing, issueCommand, ping pool update",
+            "src/bot.js: TeamBrain.command, order goal in chooseGoal, order clear in reset",
+            "src/map.js: ZONES table and zoneName replacement",
+            "src/hud.js: openWheel/wheelMove/wheelCommit, setTacMap, ghosts in drawMinimap, pings, strat/buy-call chips in renderBuy, moveCursor generalised to '.buy-item,.wheel-slice,.strat-chip'",
+            "index.html: #wheel, #tacmap, #strat chips",
+            "src/style.css: wheel, tacmap, chips, ping"
+          ],
+          "newFiles": [],
+          "contracts": [
+            "Game.contextPing(), Game.addPing(kind,pos), Game.issueCommand(kind)",
+            "TeamBrain.command(squad, kind, pos); bot.order {kind,pos,until}",
+            "hud.openWheel(), hud.wheelMove(dx,dy), hud.wheelCommit() -> kind, hud.setTacMap(on)",
+            "settings.keys.ping, settings.keys.map"
+          ],
+          "acceptance": [
+            "Tapping Z on an enemy shows a world+minimap marker for 6 s, and a nearby target-less ally bot aims there",
+            "Holding Z opens the wheel without turning the view or firing; each order changes bot behaviour and gets an ack within 1.2 s",
+            "Go B before or after an A execute call makes the player's attackers re-stage and hit B within about 5 s",
+            "Holding M shows the labelled map; there is no 'A Back' label next to the defender spawn",
+            "Spotted enemies leave fading ghosts for about 6 s; Z and M can be rebound in Controls",
+            "A late Eco call makes bots sell rifles bought this round and persists into later rounds"
+          ],
+          "effort": 4,
+          "risk": 3
+        }
+      ]
+    }
+  ],
+  "deferred": [
+    {
+      "id": "modes-3",
+      "title": "Career profile: XP, accolades, daily challenges",
+      "reason": "Only one judge picked it, and it adds nothing inside a round. W1-feedback already records the counters it needs (aces, clutches, multi), so it is a cheap next-cycle item."
+    },
+    {
+      "id": "modes-1",
+      "title": "Custom match rules and mutators",
+      "reason": "Breadth rather than depth. It touches the startMatch, ROUND and MOVE globals, and it is the foundation for the other modes, which are all deferred."
+    },
+    {
+      "id": "modes-2",
+      "title": "Clutch/ace detection",
+      "reason": "Merged into W1-feedback."
+    },
+    {
+      "id": "modes-4",
+      "title": "Retake mode",
+      "reason": "Depends on modes-1. It is most valuable after W3-postplant's retake AI exists, so it belongs to the next cycle."
+    },
+    {
+      "id": "modes-5",
+      "title": "Team Deathmatch",
+      "reason": "Risk 3 (respawn, pickups, bot goals) with low tactical value."
+    },
+    {
+      "id": "modes-6",
+      "title": "Practice range",
+      "reason": "Depends on modes-1 and trains aim only."
+    },
+    {
+      "id": "modes-8",
+      "title": "Rated adaptive difficulty",
+      "reason": "Depends on modes-1 and modes-3, and rubber-banding risks feeling unfair."
+    },
+    {
+      "id": "map-4",
+      "title": "Data-driven maps and map picker",
+      "reason": "No gameplay value without a second map. Defer until the AI generalises over POI data."
+    },
+    {
+      "id": "map-5",
+      "title": "Second map Harbor with teleporters",
+      "reason": "Effort 4, depends on map-4, and doubles the POI validation work."
+    },
+    {
+      "id": "map-3",
+      "title": "Multiple approaches per site",
+      "reason": "Merged into W3-playbook."
+    },
+    {
+      "id": "map-6",
+      "title": "Callout zones and tactical map",
+      "reason": "Merged into W4-comms."
+    },
+    {
+      "id": "map-7",
+      "title": "Plant and post spots, retakes",
+      "reason": "Merged into W3-postplant and W3-playbook."
+    },
+    {
+      "id": "ai-4",
+      "title": "LOS-generated defence positions",
+      "reason": "A heavy rewrite of every defender branch. W1-map's validated angles plus the W3-playbook setups cover most of the perceived variety."
+    },
+    {
+      "id": "ai-6",
+      "title": "Human-like hearing",
+      "reason": "Merged into W2-sound."
+    },
+    {
+      "id": "ai-7",
+      "title": "Teammates follow the human, team buy",
+      "reason": "Split between W1-economy (buy plan, drops) and W3-playbook (follow the human)."
+    },
+    {
+      "id": "ai-8",
+      "title": "Duel craft (stances, cover reloads, pistol swap, personalities)",
+      "reason": "It rewrites the core fight branch (risk 3). Only the danger dodge and blind panic were taken, into W3-hazards; the rest belongs to a later AI pass."
+    },
+    {
+      "id": "feel-1",
+      "title": "Spatial audio v2 buses and compressor",
+      "reason": "Occlusion muffle and the voice budget are merged into W2-sound. The compressor remix carries loudness risk and is skipped."
+    },
+    {
+      "id": "feel-5",
+      "title": "World-info sounds",
+      "reason": "Merged into W2-sound."
+    },
+    {
+      "id": "feel-6",
+      "title": "Flash deafening, shockwaves, blind tells",
+      "reason": "Depends on feel-1's worldLP bus and adds many systems. The blind tell is a cheap follow-up."
+    },
+    {
+      "id": "feel-7",
+      "title": "Character animation readability and footstep sync",
+      "reason": "Lower fun impact. Retuning the footstep timer would interfere with W2-sound hearing balance."
+    },
+    {
+      "id": "feel-8",
+      "title": "Match drama announcer",
+      "reason": "Merged into W1-feedback."
+    },
+    {
+      "id": "ux-1",
+      "title": "Comms wheel",
+      "reason": "Merged into W4-comms."
+    },
+    {
+      "id": "ux-2",
+      "title": "Full tactical map and minimap ghosts",
+      "reason": "Merged into W4-comms; the player-intel report is in W1-trades."
+    },
+    {
+      "id": "ux-3",
+      "title": "Ability equip and preview",
+      "reason": "Merged into W2-throw."
+    },
+    {
+      "id": "ux-5",
+      "title": "Death recap and round recap",
+      "reason": "A useful learning aid, but secondary to the core loop and it competes for busy main.js/hud.js regions. Strong next-cycle candidate."
+    },
+    {
+      "id": "ux-6",
+      "title": "Team awareness HUD",
+      "reason": "Modest fun value; defer."
+    },
+    {
+      "id": "ux-7",
+      "title": "Accessibility settings pack",
+      "reason": "Lowest fun priority in the brief."
+    },
+    {
+      "id": "ux-8",
+      "title": "Plan briefing and coach tips",
+      "reason": "The briefing is merged into W3-playbook; coach tips are low value."
+    },
+    {
+      "id": "tac-2",
+      "title": "Bot squad tactics",
+      "reason": "Merged into W1-trades and W2-botutil."
+    },
+    {
+      "id": "tac-3",
+      "title": "Attack playbook with site memory",
+      "reason": "Merged into W3-playbook."
+    },
+    {
+      "id": "tac-6",
+      "title": "Team economy planner",
+      "reason": "Became W1-economy."
+    },
+    {
+      "id": "tac-7",
+      "title": "Coordinated retake and save",
+      "reason": "Merged into W3-postplant."
+    },
+    {
+      "id": "tac-8",
+      "title": "Team command layer",
+      "reason": "Became W4-comms."
+    },
+    {
+      "id": "tac-9",
+      "title": "Defender setups",
+      "reason": "Merged into W3-playbook."
+    },
+    {
+      "id": "agents-1",
+      "title": "Equip-aim-throw pipeline",
+      "reason": "Merged into W2-throw."
+    },
+    {
+      "id": "agents-3",
+      "title": "Flash rework with true curveball and ricochet flare",
+      "reason": "Team flash and delayed pop are in W2-throw, and flash-swing is in W2-botutil. The curve bend and ricochet are a later kit pass on top of W2-throw's integrator."
+    },
+    {
+      "id": "agents-4",
+      "title": "Warden Bulwark wall",
+      "reason": "Mutates map grid state used by A*, LOS and the minimap (risk 3). Next kit pass."
+    },
+    {
+      "id": "agents-5",
+      "title": "Destructible utility",
+      "reason": "A secondary mini-duel; its main consumer (agents-7) is deferred."
+    },
+    {
+      "id": "agents-6",
+      "title": "Ultimate depth pass",
+      "reason": "Effort 4, risk 3, and collides with W2-throw's player.js and abilities.js changes."
+    },
+    {
+      "id": "agents-7",
+      "title": "New agent Mirage",
+      "reason": "Effort 5, depends on agents-5 and agents-6, and the decoy duck typing is fragile."
+    },
+    {
+      "id": "agents-9",
+      "title": "Bot utility playbook",
+      "reason": "Merged into W2-botutil."
+    },
+    {
+      "id": "agents-2",
+      "title": "Hazard awareness",
+      "reason": "Became W3-hazards."
+    }
+  ],
+  "crossCuttingRules": [
+    "Never overwrite or Write an existing file whole. Use small, targeted Edit calls, and re-read the exact region right before each edit, because other agents in the same wave edit shared files at the same time.",
+    "Only edit functions and regions that your package owns (filesOwned) or lists in sharedFileEdits. In shared files, add new methods rather than restructuring existing ones, and never reformat or reorder code you do not own.",
+    "Match the existing style: plain ES modules, 2-space indent, single quotes, no TypeScript, no new npm dependencies, and no external assets (all models, textures and sounds stay procedural or synthesized).",
+    "Performance: 60 fps with 10 characters. No per-frame allocations in hot loops: reuse module-level scratch Vector3/Quaternion objects, pool meshes and sprites, throttle raycasts and pathfinding (map.raycast allocates per call). Every new per-frame loop must be O(chars) or cached.",
+    "Two squads only: 0 is the player's team and 1 the enemy. Use match.sideOf(squad) for atk/def, and key per-team memory by squad (sides swap at halftime). The player is never given a BotController; treat world.player specially where bots read team members.",
+    "Callouts (hud.callout) that come from bot reasoning are posted only for squad 0, gated by settings.gameplay.callouts where present. Use brain.report(..., null) when no voice line is wanted.",
+    "Any new settings key must be added to DEFAULTS in settings.js (merge() drops unknown keys). New keybinds go into KEY_ACTIONS plus DEFAULTS.keys.",
+    "Every new per-round state must be cleared in the relevant reset hooks (TeamBrain.reset/onRoundStart, BotController.reset, Character.resetForRound, AbilitySystem.clear, Match.startRound) and on death where relevant. Nothing may stay visible or active across rounds.",
+    "Guard optional cross-package hooks with optional chaining (e.g. world.brain?.onFlashPop?.(owner,pos), world.camfx?.addTrauma(0.2)) so each package builds and runs even if a sibling package in the same wave has not landed yet.",
+    "Authored grid cells must be checked: add them to map.validatePoi() so a bad cell logs console.warn instead of breaking navigation.",
+    "Verify with: npx vite build --outDir <your scratchpad dir>/build --emptyOutDir. Never build into the project's dist folder. Then smoke-test in the browser by driving game.update(1/60) for several simulated rounds, checking the console for errors and the acceptance criteria.",
+    "Do not create report or markdown files in the project. Keep debug logging behind a flag (e.g. window.PV_DEBUG) and remove noisy console.log calls before finishing.",
+    "Difficulty scaling: every new bot behaviour must read a DIFFICULTY field so Easy stays forgiving (most combo, trade and adapt features are off or reduced on Easy), and existing Easy/Normal/Hard identity checks in bot.js must keep working."
+  ]
+}
